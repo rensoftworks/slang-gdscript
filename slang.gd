@@ -12,12 +12,14 @@ class Token:
 		SEPARATOR,
 		HASH,
 		NEWLINE,
-		STRING
+		STRING,
+		AT,
 	}
 
 	static var patterns: Dictionary = {
 		Type.STRING: "^\\\"(\\\\\\\"|[^\\\"])*\\\"",
 		Type.NUMBER: "^-?\\d+(\\.?\\d+)?",
+		Type.AT:"^@",
 		Type.WORD: "^[^\",\\s#\\\\\\n\\r=\\{\\}\\[\\]]+",
 		Type.NEWLINE: "^\\s*[\\n\\r]+",
 		Type.SEPARATOR: "^[,\\s]+",
@@ -83,7 +85,9 @@ class Parser:
 		KEY,
 		COMMENT,
 		EQUALS,
-		VALUE
+		VALUE,
+		DECLARE_CONSTANT,
+		RETRIEVE_CONSTANT
 	}
 
 	var expected_tokens: Dictionary = {
@@ -95,7 +99,20 @@ class Parser:
 			Token.Type.RIGHT_BRACE,
 			Token.Type.HASH,
 			Token.Type.SEPARATOR,
-			Token.Type.NEWLINE
+			Token.Type.NEWLINE,
+			Token.Type.AT
+		],
+
+		Mode.DECLARE_CONSTANT: [
+			Token.Type.WORD,
+			Token.Type.NUMBER,
+			Token.Type.STRING
+		],
+
+		Mode.RETRIEVE_CONSTANT: [
+			Token.Type.WORD,
+			Token.Type.NUMBER,
+			Token.Type.STRING
 		],
 
 		# Find an equals sign
@@ -116,7 +133,8 @@ class Parser:
 			Token.Type.LEFT_BRACE,
 			Token.Type.HASH,
 			Token.Type.SEPARATOR,
-			Token.Type.NEWLINE
+			Token.Type.NEWLINE,
+			Token.Type.AT
 		],
 
 		# Comment mode
@@ -131,7 +149,8 @@ class Parser:
 			Token.Type.LEFT_SQUARE_BRACKET,
 			Token.Type.RIGHT_SQUARE_BRACKET,
 			Token.Type.SEPARATOR,
-			Token.Type.STRING
+			Token.Type.STRING,
+			Token.Type.AT
 		]
 	}
 
@@ -146,8 +165,9 @@ class Parser:
 		
 		return true
 
-	func parse(debug: bool = false) -> Dictionary:
+	func parse(constants: Dictionary = {}, debug: bool = false) -> Dictionary:
 		var result: Dictionary = {}
+		var constant_stack: Array[String] = []
 		var key_stack: Array[String] = []
 		var terminate: bool = false
 
@@ -167,22 +187,55 @@ class Parser:
 					match current_token.type:
 						Token.Type.HASH:
 							_parse_comment(debug)
-						Token.Type.WORD:
+
+						Token.Type.AT:
+							mode_stack.push_back(Mode.DECLARE_CONSTANT)
+
+						Token.Type.WORD, Token.Type.NUMBER:
 							key_stack.push_back(current_token.content)
 							mode_stack.push_back(Mode.EQUALS)
-						Token.Type.NUMBER:
-							key_stack.push_back(current_token.content)
-							mode_stack.push_back(Mode.EQUALS)
+
 						Token.Type.STRING:
 							key_stack.push_back(current_token.content.trim_prefix("\"").trim_suffix("\""))
 							mode_stack.push_back(Mode.EQUALS)
+
 						Token.Type.RIGHT_BRACE:
 							terminate = true
+
+				Mode.DECLARE_CONSTANT:
+					match current_token.type:
+						Token.Type.WORD, Token.Type.NUMBER:
+							constant_stack.push_back(current_token.content)
+							mode_stack.pop_back()
+							mode_stack.push_back(Mode.EQUALS)
+
+						Token.Type.STRING:
+							constant_stack.push_back(current_token.content.trim_prefix("\"").trim_suffix("\""))
+							mode_stack.pop_back()
+							mode_stack.push_back(Mode.EQUALS)
+
+				Mode.RETRIEVE_CONSTANT:
+					match current_token.type:
+						Token.Type.WORD, Token.Type.NUMBER:
+							if constant_stack.size() > 0:
+								constants[constant_stack.pop_back()] = constants[current_token.content]
+							else:
+								result[key_stack.pop_back()] = constants[current_token.content]
+
+							mode_stack.pop_back()
+						Token.Type.STRING:
+							if constant_stack.size() > 0:
+								constants[constant_stack.pop_back()] = constants[current_token.content.trim_prefix("\"").trim_suffix("\"")]
+							else:
+								result[key_stack.pop_back()] = constants[current_token.content.trim_prefix("\"").trim_suffix("\"")]
+
+							mode_stack.pop_back()
 
 				Mode.EQUALS:
 					match current_token.type:
 						Token.Type.HASH:
 							_parse_comment(debug)
+
 						Token.Type.EQUALS:
 							mode_stack.pop_back()
 							mode_stack.push_back(Mode.VALUE)
@@ -191,22 +244,37 @@ class Parser:
 					match current_token.type:
 						Token.Type.HASH:
 							_parse_comment(debug)
-						Token.Type.WORD:
-							result[key_stack.pop_back()] = _parse_value()
+
+						Token.Type.AT:
 							mode_stack.pop_back()
-						Token.Type.NUMBER:
-							result[key_stack.pop_back()] = _parse_value()
+							mode_stack.push_back(Mode.RETRIEVE_CONSTANT)
+
+						Token.Type.WORD, Token.Type.NUMBER, Token.Type.STRING:
+							if constant_stack.size() > 0:
+								constants[constant_stack.pop_back()] = _parse_value()
+							else:
+								result[key_stack.pop_back()] = _parse_value()
+							
 							mode_stack.pop_back()
-						Token.Type.STRING:
-							result[key_stack.pop_back()] = _parse_value()
-							mode_stack.pop_back()
+
 						Token.Type.LEFT_SQUARE_BRACKET:
 							current_token = lexer.next_token()
-							result[key_stack.pop_back()] = _parse_array(debug)
+
+							if constant_stack.size() > 0:
+								constants[constant_stack.pop_back()] = _parse_array(constants, debug)
+							else:
+								result[key_stack.pop_back()] = _parse_array(constants, debug)
+
 							mode_stack.pop_back()
+
 						Token.Type.LEFT_BRACE:
 							current_token = lexer.next_token()
-							result[key_stack.pop_back()] = parse(debug)
+
+							if constant_stack.size() > 0:
+								constants[constant_stack.pop_back()] = parse(constants, debug)
+							else:
+								result[key_stack.pop_back()] = parse(constants, debug)
+
 							mode_stack.pop_back()
 
 				_:
@@ -244,14 +312,17 @@ class Parser:
 						return false
 					_:
 						return current_token.content
+
 			Token.Type.NUMBER:
 				return float(current_token.content)
+
 			Token.Type.STRING:
 				return current_token.content.trim_prefix("\"").trim_suffix("\"").replace("\\", "")
+
 			_:
 				return null
 
-	func _parse_array(debug: bool) -> Array:
+	func _parse_array(constants: Dictionary = {}, debug: bool = false) -> Array:
 		if debug:
 			print("[Slang] Start parsing array")
 
@@ -270,18 +341,18 @@ class Parser:
 			match current_token.type:
 				Token.Type.HASH:
 					_parse_comment(debug)
-				Token.Type.WORD:
+
+				Token.Type.WORD, Token.Type.NUMBER, Token.Type.STRING:
 					buffer.push_back(_parse_value())
-				Token.Type.NUMBER:
-					buffer.push_back(_parse_value())
-				Token.Type.STRING:
-					buffer.push_back(_parse_value())
+
 				Token.Type.LEFT_SQUARE_BRACKET:
 					current_token = lexer.next_token()
-					buffer.push_back(_parse_array(debug))
+					buffer.push_back(_parse_array(constants, debug))
+
 				Token.Type.LEFT_BRACE:
 					current_token = lexer.next_token()
-					buffer.push_back(parse(debug))
+					buffer.push_back(parse(constants, debug))
+
 				Token.Type.RIGHT_SQUARE_BRACKET:
 					terminate = true
 
@@ -321,9 +392,8 @@ class Parser:
 		if debug:
 			print("[Slang] End parsing comment")
 
-
 static func parse(string: String, debug: bool = false) -> Dictionary:
-	return Parser.new(string).parse(debug)
+	return Parser.new(string).parse({}, debug)
 
 static func stringify(dict: Dictionary, inline: bool = false) -> String:
 	var string: String = ""
@@ -349,6 +419,7 @@ static func _stringify_value(value: Variant) -> String:
 	match typeof(value):
 		TYPE_DICTIONARY:
 			string += "{%s}" % stringify(value, true)
+
 		TYPE_ARRAY:
 			string += "["
 
@@ -359,10 +430,13 @@ static func _stringify_value(value: Variant) -> String:
 					string += ", "
 
 			string += "]"
+
 		TYPE_STRING:
 			string += "\"%s\"" % value
+
 		TYPE_NIL:
 			string += "null"
+
 		_:
 			string += "%s" % value
 
