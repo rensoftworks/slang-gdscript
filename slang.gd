@@ -1,4 +1,4 @@
-# slang-gdscript v0.2.1
+# slang-gdscript v0.2.2
 # https://github.com/rensoftworks/slang-gdscript
 
 # MIT License
@@ -461,7 +461,7 @@ static func _stringify_value(value: Variant) -> String:
 			string += "]"
 
 		TYPE_STRING:
-			string += "\"%s\"" % value
+			string += "\"%s\"" % value.replace("\"", "\\\"")
 
 		TYPE_NIL:
 			string += "null"
